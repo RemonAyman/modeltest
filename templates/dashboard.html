@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Dashboard - Bus Delay AI</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+    <div class="orb orb-1"></div>
+    <div class="orb orb-2"></div>
+
+    <div class="glass-card dashboard-card">
+        <div style="display: flex; justify-content: space-between; align-items: center;">
+            <h1>AI Predictor</h1>
+            <a href="/logout" class="link" style="margin:0;">Logout {{ user }}</a>
+        </div>
+        <p>Configure your trip parameters below</p>
+
+        <form id="predictionForm">
+            <div class="dash-grid">
+                <div class="form-group">
+                    <label>Select Route</label>
+                    <select name="route" id="route" required>
+                        <option value="R1">Route 1 (R1)</option>
+                        <option value="R2">Route 2 (R2)</option>
+                        <option value="R3">Route 3 (R3)</option>
+                        <option value="R4">Route 4 (R4)</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label>Weather Condition</label>
+                    <select name="weather" id="weather" required>
+                        <option value="sunny">Sunny</option>
+                        <option value="rainy">Rainy</option>
+                        <option value="cloudy">Cloudy</option>
+                        <option value="clear">Clear</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label>Current Time</label>
+                    <input type="time" name="time" id="time" required>
+                </div>
+                <div class="form-group">
+                    <label>Day Type</label>
+                    <select name="day_type" id="day_type" required>
+                        <option value="weekday">Weekday</option>
+                        <option value="weekend">Weekend</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label>Passenger Count</label>
+                    <input type="number" name="passengers" id="passengers" value="50" min="1" max="200" required>
+                </div>
+            </div>
+
+            <button type="submit" class="btn-primary" id="predictBtn">Analyze Delay via AI</button>
+        </form>
+
+        <div id="results" class="result-section" style="display: none;">
+            <div class="res-box res-rf">
+                <h3>Random Forest</h3>
+                <div class="score" id="rfVal">--</div>
+                <div class="accuracy"><span id="rfAcc">--</span></div>
+            </div>
+            <div class="res-box res-lr">
+                <h3>Linear Regression</h3>
+                <div class="score" id="lrVal">--</div>
+                <div class="accuracy"><span id="lrAcc">--</span></div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        document.getElementById('predictionForm').addEventListener('submit', async function(e) {
+            e.preventDefault();
+            
+            const btn = document.getElementById('predictBtn');
+            const resSection = document.getElementById('results');
+            
+            btn.innerHTML = 'Crunching Numbers...';
+            btn.disabled = true;
+            
+            const formData = {
+                route: document.getElementById('route').value,
+                weather: document.getElementById('weather').value,
+                time: document.getElementById('time').value,
+                day_type: document.getElementById('day_type').value,
+                passengers: document.getElementById('passengers').value
+            };
+            
+            try {
+                const response = await fetch('/predict', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify(formData)
+                });
+                
+                const data = await response.json();
+                
+                if (response.ok) {
+                    resSection.style.display = 'flex';
+                    document.getElementById('rfVal').innerText = data.rf_prediction + 'm';
+                    document.getElementById('rfAcc').innerText = data.rf_accuracy;
+                    
+                    document.getElementById('lrVal').innerText = data.lr_prediction + 'm';
+                    document.getElementById('lrAcc').innerText = data.lr_accuracy;
+                } else {
+                    alert('Error: ' + data.error);
+                }
+                
+            } catch (error) {
+                console.error('Error:', error);
+                alert('Connection failed');
+            }
+            
+            btn.innerHTML = 'Analyze Delay via AI';
+            btn.disabled = false;
+        });
+    </script>
+</body>
+</html>
