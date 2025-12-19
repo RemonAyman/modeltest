@@ -199,3 +199,38 @@ select option { background: #1a1a2e; }
     .dash-grid { grid-template-columns: 1fr; }
     .result-section { flex-direction: column; }
 }
+
+/* Charts grid */
+.charts-grid {
+    display: flex;
+    gap: 20px;
+    margin-top: 12px;
+}
+.chart-card {
+    flex: 1;
+    background: rgba(0,0,0,0.25);
+    border-radius: 12px;
+    padding: 14px;
+    text-align: center;
+    border: 1px solid var(--card-border);
+    cursor: pointer;
+}
+.chart-card h4 { margin-bottom: 8px; color: var(--text-muted); }
+
+/* Modal */
+.modal { position: fixed; z-index: 9999; left: 0; top: 0; width: 100%; height: 100%; overflow: auto; background-color: rgba(0,0,0,0.6); display:flex; align-items:center; justify-content:center; }
+.modal-content { background: rgba(10,10,20,0.95); border-radius: 12px; padding: 20px; width: 90%; max-width: 900px; color: var(--text-main); }
+.modal-close { float: right; font-size: 24px; cursor: pointer; color: var(--text-muted); }
+.modal-close:hover { color: var(--primary); }
+
+@media (max-width: 768px) {
+    .charts-grid { flex-direction: column; }
+}
+
+/* Canvas wrapper to control size */
+.chart-wrap { width: 100%; height: 180px; display:flex; align-items:center; justify-content:center; }
+.chart-wrap canvas { max-height: 100%; width:100% !important; height:100% !important; }
+
+/* Small reason button */
+.btn-small { background: transparent; border: 1px solid var(--card-border); color: var(--text-muted); padding:8px 10px; border-radius:8px; cursor:pointer; margin-top:10px; }
+.btn-small:hover { color: var(--text-main); border-color: var(--primary); }

@@ -61,11 +61,45 @@
                 <h3>Random Forest</h3>
                 <div class="score" id="rfVal">--</div>
                 <div class="accuracy"><span id="rfAcc">--</span></div>
+                <button class="btn-small reason-btn" id="rfReasonBtn">Reason</button>
             </div>
             <div class="res-box res-lr">
                 <h3>Linear Regression</h3>
                 <div class="score" id="lrVal">--</div>
                 <div class="accuracy"><span id="lrAcc">--</span></div>
+                <button class="btn-small reason-btn" id="lrReasonBtn">Reason</button>
+            </div>
+        </div>
+    </div>
+
+    <div class="glass-card" style="margin-top:20px; width: 800px; max-width:95%;">
+        <h2>Model Analysis & Charts</h2>
+        <p>
+            <button id="toggleCharts" class="btn-primary" style="width:auto;padding:8px 14px;">CHARTS</button>
+            &nbsp;&nbsp;Click a chart or press <b>Reason</b> under a model for details.
+        </p>
+
+        <div class="charts-grid" id="chartsGrid" style="display:none;">
+            <div class="chart-card" id="card-model">
+                <h4>Model Comparison</h4>
+                <div class="chart-wrap"><canvas id="modelChart"></canvas></div>
+            </div>
+            <div class="chart-card" id="card-dist">
+                <h4>Delay Distribution</h4>
+                <div class="chart-wrap"><canvas id="distChart"></canvas></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Modal for details -->
+    <div id="chartModal" class="modal" style="display:none;">
+        <div class="modal-content">
+            <span class="modal-close">×</span>
+            <h3 id="modalTitle">Details</h3>
+            <div id="modalBody">
+                <canvas id="modalChart" width="600" height="300"></canvas>
+                <div id="analysisText" style="margin-top:12px;color:var(--text-muted);"></div>
+                <div id="rawData" style="margin-top:12px;color:var(--text-muted);"></div>
             </div>
         </div>
     </div>
@@ -116,6 +150,124 @@
             btn.innerHTML = 'Analyze Delay via AI';
             btn.disabled = false;
         });
+    </script>
+    <!-- Chart.js CDN -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script>
+        // Fetch chart data and render small charts
+        async function loadCharts(){
+            try{
+                const res = await fetch('/charts-data');
+                const json = await res.json();
+
+                // Model chart (RMSE comparison)
+                const rf_rmse = json.rf_metrics ? json.rf_metrics.rmse : null;
+                const lr_rmse = json.lr_metrics ? json.lr_metrics.rmse : null;
+                const modelCtx = document.getElementById('modelChart').getContext('2d');
+                window.modelChartObj = new Chart(modelCtx, {
+                    type: 'bar',
+                    data: {
+                        labels: ['Random Forest','Linear Reg'],
+                        datasets: [{
+                            label: 'RMSE (lower is better)',
+                            data: [rf_rmse || 0, lr_rmse || 0],
+                            backgroundColor: ['rgba(0,212,255,0.8)','rgba(255,0,122,0.8)']
+                        }]
+                    },
+                    options:{
+                        responsive:true, maintainAspectRatio:false, plugins:{legend:{display:false}},
+                    }
+                });
+
+                // Distribution chart
+                const buckets = json.dataset && json.dataset.buckets_pct ? json.dataset.buckets_pct : {'0-5':0,'5-15':0,'15-30':0,'30+':0};
+                const distCtx = document.getElementById('distChart').getContext('2d');
+                window.distChartObj = new Chart(distCtx, {
+                    type:'doughnut',
+                    data:{
+                        labels: Object.keys(buckets),
+                        datasets:[{data: Object.values(buckets), backgroundColor:['#00d4ff','#ff75b5','#ffb86b','#9be7a8']}]
+                    },
+                    options:{responsive:true, maintainAspectRatio:false, plugins:{legend:{position:'bottom'}}}
+                });
+
+                // Click handlers to open modal with details
+                document.getElementById('card-model').addEventListener('click', ()=>openModal('Model Comparison', json, 'model'));
+                document.getElementById('card-dist').addEventListener('click', ()=>openModal('Delay Distribution', json, 'dist'));
+
+                // Reason buttons under result boxes
+                document.getElementById('rfReasonBtn').addEventListener('click', ()=>openModal('Random Forest — Reason', json, 'rf'));
+                document.getElementById('lrReasonBtn').addEventListener('click', ()=>openModal('Linear Regression — Reason', json, 'lr'));
+
+            }catch(err){
+                console.error('Charts load failed', err);
+            }
+        }
+
+        function openModal(title, json, which){
+            document.getElementById('modalTitle').innerText = title;
+            document.getElementById('chartModal').style.display = 'block';
+
+            const ctx = document.getElementById('modalChart').getContext('2d');
+            if(window.modalChart) window.modalChart.destroy();
+
+            if(which === 'model'){
+                const data = [json.rf_metrics ? json.rf_metrics.rmse : 0, json.lr_metrics ? json.lr_metrics.rmse : 0];
+                window.modalChart = new Chart(ctx, {type:'bar', data:{labels:['RF','LR'], datasets:[{label:'RMSE', data:data, backgroundColor:['#00d4ff','#ff007a']}]}, options:{responsive:true}});
+
+                // analysis text and raw features
+                const reasons = json.reasons || [];
+                const feat = json.rf_top_features || [];
+                const lr = json.lr_top_coefs || [];
+                document.getElementById('analysisText').innerHTML = '<b>Automatic analysis:</b><br/>' + reasons.join('<br/>');
+                let raw = '<h4>RF Top Features</h4><ul>' + feat.map(f=>`<li>${f.feature}: ${f.importance}</li>`).join('') + '</ul>';
+                raw += '<h4>LR Top Coefs</h4><ul>' + lr.map(f=>`<li>${f.feature}: ${f.coef}</li>`).join('') + '</ul>';
+                document.getElementById('rawData').innerHTML = raw;
+            } else if(which === 'rf' || which === 'lr'){
+                // Show model-specific reason and features
+                const model = which === 'rf' ? 'rf' : 'lr';
+                if(model === 'rf'){
+                    const feat = json.rf_top_features || [];
+                    window.modalChart = new Chart(ctx, {type:'bar', data:{labels: feat.map(f=>f.feature), datasets:[{label:'Importance', data:feat.map(f=>f.importance), backgroundColor:'#00d4ff'}]}, options:{responsive:true, maintainAspectRatio:false}});
+                    const reasons = json.reasons || [];
+                    document.getElementById('analysisText').innerHTML = '<b>Reason (RF):</b><br/>' + (reasons.join('<br/>') || 'No automatic reason available');
+                    document.getElementById('rawData').innerHTML = '<h4>Top RF Features</h4><ul>' + feat.map(f=>`<li>${f.feature}: ${f.importance}</li>`).join('') + '</ul>';
+                } else {
+                    const lr = json.lr_top_coefs || [];
+                    window.modalChart = new Chart(ctx, {type:'bar', data:{labels: lr.map(f=>f.feature), datasets:[{label:'Coef', data:lr.map(f=>f.coef), backgroundColor:'#ff007a'}]}, options:{responsive:true, maintainAspectRatio:false}});
+                    const reasons = json.reasons || [];
+                    document.getElementById('analysisText').innerHTML = '<b>Reason (LR):</b><br/>' + (reasons.join('<br/>') || 'No automatic reason available');
+                    document.getElementById('rawData').innerHTML = '<h4>Top LR Coefs</h4><ul>' + lr.map(f=>`<li>${f.feature}: ${f.coef}</li>`).join('') + '</ul>';
+                }
+            } else {
+                // distribution modal
+                const buckets = json.dataset && json.dataset.buckets ? json.dataset.buckets : {};
+                const labels = Object.keys(buckets);
+                const values = Object.values(buckets);
+                window.modalChart = new Chart(ctx, {type:'pie', data:{labels:labels, datasets:[{data:values, backgroundColor:['#00d4ff','#ff75b5','#ffb86b','#9be7a8']}]}, options:{responsive:true}});
+
+                const ds = json.dataset || {};
+                document.getElementById('analysisText').innerHTML = `<b>Dataset:</b> ${ds.total_samples || 'N/A'} samples — mean ${ds.mean_delay || 'N/A'}m — pct >15m: ${ds.pct_over_15 || 'N/A'}%`;
+                let raw = '<h4>Buckets</h4><ul>' + (ds.buckets ? Object.entries(ds.buckets).map(b=>`<li>${b[0]}: ${b[1]}</li>`).join('') : '') + '</ul>';
+                document.getElementById('rawData').innerHTML = raw;
+            }
+        }
+
+        document.querySelector('.modal-close').addEventListener('click', ()=>{document.getElementById('chartModal').style.display='none';});
+        window.addEventListener('click', (e)=>{ if(e.target.id === 'chartModal') document.getElementById('chartModal').style.display='none';});
+
+        // Toggle charts visibility by CHARTS button
+        document.getElementById('toggleCharts').addEventListener('click', ()=>{
+            const g = document.getElementById('chartsGrid');
+            if(g.style.display === 'none' || g.style.display === ''){
+                g.style.display = 'flex';
+                loadCharts();
+            } else {
+                g.style.display = 'none';
+            }
+        });
+
+        loadCharts();
     </script>
 </body>
 </html>

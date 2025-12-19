@@ -117,6 +117,98 @@ def dashboard():
     return render_template("dashboard.html", user=session["user"])
 
 
+@app.route('/charts-data')
+def charts_data():
+    # Returns JSON used by frontend charts: dataset distribution, model metrics,
+    # top features and brief reasons for model differences.
+    try:
+        # Dataset summary (if cleaned CSV exists)
+        ds_stats = {}
+        try:
+            df = pd.read_csv('cleaned_transport_dataset.csv')
+            total = len(df)
+            mean_delay = float(df['delay_minutes'].mean()) if 'delay_minutes' in df else None
+            median_delay = float(df['delay_minutes'].median()) if 'delay_minutes' in df else None
+            buckets = {
+                '0-5': int(((df['delay_minutes'] >= 0) & (df['delay_minutes'] < 5)).sum()),
+                '5-15': int(((df['delay_minutes'] >= 5) & (df['delay_minutes'] < 15)).sum()),
+                '15-30': int(((df['delay_minutes'] >= 15) & (df['delay_minutes'] < 30)).sum()),
+                '30+': int((df['delay_minutes'] >= 30).sum()),
+            }
+            buckets_pct = {k: round(v / total * 100, 1) if total > 0 else 0 for k, v in buckets.items()}
+            ds_stats = {
+                'total_samples': int(total),
+                'mean_delay': mean_delay,
+                'median_delay': median_delay,
+                'buckets': buckets,
+                'buckets_pct': buckets_pct,
+                'pct_over_15': round((df['delay_minutes'] >= 15).sum() / total * 100, 1) if total > 0 else 0,
+            }
+        except Exception:
+            ds_stats = {'error': 'cleaned dataset not found or unreadable'}
+
+        # Model metrics
+        rf_m = model_data.get('rf_metrics', {}) if model_data else {}
+        lr_m = model_data.get('lr_metrics', {}) if model_data else {}
+
+        # Feature importance and coefficients
+        top_features = []
+        lr_coefs = []
+        try:
+            cols = model_data.get('feature_columns', []) if model_data else []
+            if rf_model is not None and hasattr(rf_model, 'feature_importances_'):
+                fi = list(rf_model.feature_importances_)
+                pairs = sorted(list(zip(cols, fi)), key=lambda x: x[1], reverse=True)[:8]
+                top_features = [{'feature': p[0], 'importance': round(float(p[1]), 4)} for p in pairs]
+
+            if lr_model is not None and hasattr(lr_model, 'coef_'):
+                coefs = list(lr_model.coef_)
+                pairs = sorted(list(zip(cols, coefs)), key=lambda x: abs(x[1]), reverse=True)[:8]
+                lr_coefs = [{'feature': p[0], 'coef': round(float(p[1]), 4)} for p in pairs]
+        except Exception:
+            top_features = []
+            lr_coefs = []
+
+        # Short textual reasons (automatic): based on RMSE/R2 and feature importance
+        reasons = []
+        try:
+            if rf_m and lr_m:
+                rf_rmse = rf_m.get('rmse')
+                lr_rmse = lr_m.get('rmse')
+                rf_r2 = rf_m.get('r2')
+                lr_r2 = lr_m.get('r2')
+
+                if rf_rmse and lr_rmse:
+                    if rf_rmse < lr_rmse:
+                        reasons.append('Random Forest has lower RMSE — better at capturing non-linear patterns and outliers.')
+                    else:
+                        reasons.append('Linear Regression has lower RMSE — data may be mostly linear.')
+
+                if rf_r2 and lr_r2:
+                    if rf_r2 > lr_r2:
+                        reasons.append('Random Forest higher R2% — explains more variance across features.')
+                    else:
+                        reasons.append('Linear Regression higher R2% — simpler linear relationships dominate.')
+
+                if top_features:
+                    reasons.append('Top features affecting delay: ' + ', '.join([t['feature'] for t in top_features[:5]]))
+        except Exception:
+            pass
+
+        payload = {
+            'dataset': ds_stats,
+            'rf_metrics': rf_m,
+            'lr_metrics': lr_m,
+            'rf_top_features': top_features,
+            'lr_top_coefs': lr_coefs,
+            'reasons': reasons,
+        }
+
+        return jsonify(payload)
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
 @app.route("/predict", methods=["POST"])
 def predict():
     if "user" not in session:
