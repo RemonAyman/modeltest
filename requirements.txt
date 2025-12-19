@@ -1,9 +1,0 @@
-flask
-joblib
-pandas
-numpy
-scikit-learn
-werkzeug
-vercel-wsgi
-
-# If your project uses additional packages (e.g. matplotlib), add them here.
