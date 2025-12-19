@@ -276,13 +276,48 @@ def predict():
         rf_pred = round(max(0, rf_raw), 1)
         lr_pred = round(max(0, lr_raw), 1)
 
-        # Return RMSE as accuracy metric
+        # Build simple per-prediction explanations
+        rf_reason = 'RF explanation not available.'
+        lr_reason = 'LR explanation not available.'
+
+        try:
+            cols = model_data.get('feature_columns', [])
+            # For LR: use coefficients * feature values as contribution proxy
+            if lr_model is not None and hasattr(lr_model, 'coef_'):
+                coefs = np.array(lr_model.coef_)
+                # ensure df_final columns align with cols
+                vals = df_final[cols].iloc[0].values.astype(float)
+                contrib = coefs * vals
+                # get top contributors by absolute impact
+                idxs = np.argsort(np.abs(contrib))[::-1][:5]
+                parts = []
+                for i in idxs:
+                    parts.append(f"{cols[i]}: {contrib[i]:+.2f}")
+                lr_reason = f"Linear model contributions (coef*value): {', '.join(parts)}"
+
+            # For RF: show top feature importances and sample values
+            if rf_model is not None and hasattr(rf_model, 'feature_importances_'):
+                fi = np.array(rf_model.feature_importances_)
+                idxs = np.argsort(fi)[::-1][:5]
+                parts = []
+                for i in idxs:
+                    feat = cols[i]
+                    importance = fi[i]
+                    val = df_final.get(feat, pd.Series([0])).iloc[0] if feat in df_final.columns else 0
+                    parts.append(f"{feat} (imp={importance:.3f}) val={val}")
+                rf_reason = f"RF top features for this sample: {', '.join(parts)}"
+        except Exception as e:
+            print('Explanation generation error:', e)
+
+        # Return predictions, accuracies and per-model reasons
         return jsonify(
             {
                 "rf_prediction": rf_pred,
                 "lr_prediction": lr_pred,
                 "rf_accuracy": f"RMSE: {rf_metrics.get('rmse', 'N/A')}",
                 "lr_accuracy": f"RMSE: {lr_metrics.get('rmse', 'N/A')}",
+                "rf_reason": rf_reason,
+                "lr_reason": lr_reason,
             }
         )
 

@@ -135,9 +135,28 @@
                     resSection.style.display = 'flex';
                     document.getElementById('rfVal').innerText = data.rf_prediction + 'm';
                     document.getElementById('rfAcc').innerText = data.rf_accuracy;
-                    
                     document.getElementById('lrVal').innerText = data.lr_prediction + 'm';
                     document.getElementById('lrAcc').innerText = data.lr_accuracy;
+
+                    // Save latest prediction with reasons
+                    window.latestPrediction = data;
+
+                    // Hook reason buttons to show per-prediction reason (prefer prediction-level reason)
+                    document.getElementById('rfReasonBtn').onclick = ()=>{
+                        const text = (window.latestPrediction && window.latestPrediction.rf_reason) || 'No RF reason available.';
+                        document.getElementById('modalTitle').innerText = 'Random Forest — Reason';
+                        document.getElementById('analysisText').innerHTML = '<b>Reason:</b><br/>' + text;
+                        document.getElementById('rawData').innerHTML = '';
+                        document.getElementById('chartModal').style.display = 'block';
+                    };
+                    document.getElementById('lrReasonBtn').onclick = ()=>{
+                        const text = (window.latestPrediction && window.latestPrediction.lr_reason) || 'No LR reason available.';
+                        document.getElementById('modalTitle').innerText = 'Linear Regression — Reason';
+                        document.getElementById('analysisText').innerHTML = '<b>Reason:</b><br/>' + text;
+                        document.getElementById('rawData').innerHTML = '';
+                        document.getElementById('chartModal').style.display = 'block';
+                    };
+
                 } else {
                     alert('Error: ' + data.error);
                 }
@@ -160,18 +179,28 @@
                 const res = await fetch('/charts-data');
                 const json = await res.json();
 
-                // Model chart (RMSE comparison)
-                const rf_rmse = json.rf_metrics ? json.rf_metrics.rmse : null;
-                const lr_rmse = json.lr_metrics ? json.lr_metrics.rmse : null;
+                // Model chart: show predictions when available, otherwise RMSE
                 const modelCtx = document.getElementById('modelChart').getContext('2d');
+                let modelDataValues;
+                let modelLabel;
+                if(window.latestPrediction){
+                    modelDataValues = [window.latestPrediction.rf_prediction || 0, window.latestPrediction.lr_prediction || 0];
+                    modelLabel = 'Predicted delay (min)';
+                } else {
+                    const rf_rmse = json.rf_metrics ? json.rf_metrics.rmse : 0;
+                    const lr_rmse = json.lr_metrics ? json.lr_metrics.rmse : 0;
+                    modelDataValues = [rf_rmse || 0, lr_rmse || 0];
+                    modelLabel = 'RMSE (lower is better)';
+                }
+                if(window.modelChartObj) window.modelChartObj.destroy();
                 window.modelChartObj = new Chart(modelCtx, {
                     type: 'bar',
                     data: {
                         labels: ['Random Forest','Linear Reg'],
                         datasets: [{
-                            label: 'RMSE (lower is better)',
-                            data: [rf_rmse || 0, lr_rmse || 0],
-                            backgroundColor: ['rgba(0,212,255,0.8)','rgba(255,0,122,0.8)']
+                            label: modelLabel,
+                            data: modelDataValues,
+                            backgroundColor: ['rgba(0,212,255,0.9)','rgba(255,0,122,0.9)']
                         }]
                     },
                     options:{
@@ -182,11 +211,23 @@
                 // Distribution chart
                 const buckets = json.dataset && json.dataset.buckets_pct ? json.dataset.buckets_pct : {'0-5':0,'5-15':0,'15-30':0,'30+':0};
                 const distCtx = document.getElementById('distChart').getContext('2d');
+                // determine highlight based on latest prediction average
+                let colors = ['#00d4ff','#ff75b5','#ffb86b','#9be7a8'];
+                if(window.latestPrediction){
+                    const avgPred = ((window.latestPrediction.rf_prediction || 0) + (window.latestPrediction.lr_prediction || 0))/2;
+                    let idx = 0;
+                    if(avgPred < 5) idx = 0;
+                    else if(avgPred < 15) idx = 1;
+                    else if(avgPred < 30) idx = 2;
+                    else idx = 3;
+                    colors = colors.map((c,i)=> i===idx ? c : c + '55');
+                }
+                if(window.distChartObj) window.distChartObj.destroy();
                 window.distChartObj = new Chart(distCtx, {
                     type:'doughnut',
                     data:{
                         labels: Object.keys(buckets),
-                        datasets:[{data: Object.values(buckets), backgroundColor:['#00d4ff','#ff75b5','#ffb86b','#9be7a8']}]
+                        datasets:[{data: Object.values(buckets), backgroundColor: colors}]
                     },
                     options:{responsive:true, maintainAspectRatio:false, plugins:{legend:{position:'bottom'}}}
                 });
@@ -256,18 +297,21 @@
         document.querySelector('.modal-close').addEventListener('click', ()=>{document.getElementById('chartModal').style.display='none';});
         window.addEventListener('click', (e)=>{ if(e.target.id === 'chartModal') document.getElementById('chartModal').style.display='none';});
 
-        // Toggle charts visibility by CHARTS button
-        document.getElementById('toggleCharts').addEventListener('click', ()=>{
+        // Toggle charts visibility by CHARTS button — require a prediction first
+        document.getElementById('toggleCharts').addEventListener('click', async ()=>{
+            if(!window.latestPrediction){
+                alert('ادخل بيانات الرحلة واضغط "Analyze Delay" عشان تشوف الشارتس.');
+                return;
+            }
             const g = document.getElementById('chartsGrid');
             if(g.style.display === 'none' || g.style.display === ''){
                 g.style.display = 'flex';
-                loadCharts();
+                // load and render charts based on latestPrediction
+                await loadCharts();
             } else {
                 g.style.display = 'none';
             }
         });
-
-        loadCharts();
     </script>
 </body>
 </html>
