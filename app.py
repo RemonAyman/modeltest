@@ -40,16 +40,37 @@ init_db()
 # Load Model
 try:
     model_data = joblib.load("model_data.pkl")
-    rf_model = model_data["rf_model"]
-    lr_model = model_data["lr_model"]
-    rf_metrics = model_data["rf_metrics"]
-    lr_metrics = model_data["lr_metrics"]
+    # prefer a serving/best model if present
+    serving_model = model_data.get("serving_model") or model_data.get("best_model") or model_data.get("rf_model")
+    # keep lr_model for comparison if available
+    lr_model = model_data.get("lr_model")
+    # prefer a dedicated rf_model stored in model_data; otherwise fall back to serving_model
+    rf_model = model_data.get('rf_model', serving_model)
+    rf_metrics = model_data.get("rf_metrics", {})
+    lr_metrics = model_data.get("lr_metrics", {})
     # Feature columns for alignment
     model_data.get("feature_columns", [])
+    # route_stats (dict of lists) -> DataFrame for quick lookup
+    route_stats_df = None
+    if model_data.get('route_stats'):
+        try:
+            route_stats_df = pd.DataFrame(model_data.get('route_stats'))
+        except Exception:
+            route_stats_df = None
+    # load cleaned dataset for route_hour_mean and weather_mean lookups
+    df_clean = None
+    try:
+        df_clean = pd.read_csv('cleaned_transport_dataset.csv')
+        # build lookup maps
+        route_hour_map = df_clean.set_index(['route_id', 'hour'])['route_hour_mean'].to_dict()
+        weather_mean_map = df_clean.groupby('weather')['weather_mean_delay'].mean().to_dict()
+    except Exception:
+        route_hour_map = {}
+        weather_mean_map = {}
 except Exception as e:
     print(f"Error loading model: {e}")
     # Fallback for dev if model not trained yet
-    rf_model = lr_model = None
+    serving_model = rf_model = lr_model = None
 
 
 @app.route("/")
@@ -150,6 +171,7 @@ def charts_data():
         # Model metrics
         rf_m = model_data.get('rf_metrics', {}) if model_data else {}
         lr_m = model_data.get('lr_metrics', {}) if model_data else {}
+        hgb_m = model_data.get('hgb_metrics', {}) if model_data else {}
 
         # Feature importance and coefficients
         top_features = []
@@ -172,36 +194,52 @@ def charts_data():
         # Short textual reasons (automatic): based on RMSE/R2 and feature importance
         reasons = []
         try:
-            if rf_m and lr_m:
-                rf_rmse = rf_m.get('rmse')
-                lr_rmse = lr_m.get('rmse')
-                rf_r2 = rf_m.get('r2')
-                lr_r2 = lr_m.get('r2')
+            # Compare available model metrics
+            comps = []
+            if rf_m:
+                comps.append(('RF', rf_m))
+            if hgb_m:
+                comps.append(('HGB', hgb_m))
+            if lr_m:
+                comps.append(('LR', lr_m))
 
-                if rf_rmse and lr_rmse:
-                    if rf_rmse < lr_rmse:
-                        reasons.append('Random Forest has lower RMSE — better at capturing non-linear patterns and outliers.')
-                    else:
-                        reasons.append('Linear Regression has lower RMSE — data may be mostly linear.')
+            # Simple comparisons by RMSE and R2
+            best_rmse = None
+            for name, m in comps:
+                rmse = m.get('rmse')
+                if rmse is not None:
+                    if best_rmse is None or rmse < best_rmse[0]:
+                        best_rmse = (rmse, name)
 
-                if rf_r2 and lr_r2:
-                    if rf_r2 > lr_r2:
-                        reasons.append('Random Forest higher R2% — explains more variance across features.')
-                    else:
-                        reasons.append('Linear Regression higher R2% — simpler linear relationships dominate.')
+            if best_rmse:
+                reasons.append(f"Best RMSE: {best_rmse[1]} (RMSE={best_rmse[0]})")
 
-                if top_features:
-                    reasons.append('Top features affecting delay: ' + ', '.join([t['feature'] for t in top_features[:5]]))
+            # Top features hint
+            if top_features:
+                reasons.append('Top features affecting delay: ' + ', '.join([t['feature'] for t in top_features[:5]]))
         except Exception:
             pass
+
+        # Dataset correlations (numeric) from cleaned csv if available
+        correlations = {}
+        try:
+            df_clean = pd.read_csv('cleaned_transport_dataset.csv')
+            num_cols = df_clean.select_dtypes(include=[float, int]).columns.tolist()
+            corr = df_clean[num_cols].corrwith(df_clean['delay_minutes']).abs().sort_values(ascending=False)
+            correlations = corr.head(12).to_dict()
+        except Exception:
+            correlations = {}
 
         payload = {
             'dataset': ds_stats,
             'rf_metrics': rf_m,
             'lr_metrics': lr_m,
+            'hgb_metrics': hgb_m,
             'rf_top_features': top_features,
             'lr_top_coefs': lr_coefs,
             'reasons': reasons,
+            'correlations': correlations,
+            'route_stats': model_data.get('route_stats', {}),
         }
 
         return jsonify(payload)
@@ -214,7 +252,7 @@ def predict():
     if "user" not in session:
         return jsonify({"error": "Unauthorized"}), 401
 
-    if not rf_model:
+    if not serving_model:
         return jsonify({"error": "Model not loaded"}), 500
 
     data = request.json
@@ -246,14 +284,60 @@ def predict():
         }
         df_input = pd.DataFrame(input_data)
 
-        # 3. Scaling Numerical Features
+        # 3. Ensure all numeric features expected by the model exist (fill or compute)
         scaler = model_data.get("scaler")
-        num_features = model_data.get(
-            "num_features", ["passenger_count", "hour", "is_weekend"]
-        )
+        num_features = model_data.get("num_features", ["passenger_count", "hour", "is_weekend"])
 
+        # compute cyclical hour features
+        if "hour_sin" in num_features and "hour_sin" not in df_input.columns:
+            df_input["hour_sin"] = np.sin(2 * np.pi * df_input["hour"] / 24)
+        if "hour_cos" in num_features and "hour_cos" not in df_input.columns:
+            df_input["hour_cos"] = np.cos(2 * np.pi * df_input["hour"] / 24)
+
+        # route-based aggregated features from route_stats_df
+        if "route_mean_delay" in num_features:
+            if "route_id" in df_input.columns and route_stats_df is not None:
+                rmap = route_stats_df.set_index('route_id').to_dict(orient='index')
+                df_input["route_mean_delay"] = df_input["route_id"].apply(lambda r: rmap.get(r, {}).get('route_mean_delay', 0))
+                df_input["route_median_delay"] = df_input["route_id"].apply(lambda r: rmap.get(r, {}).get('route_median_delay', 0))
+                df_input["route_std_delay"] = df_input["route_id"].apply(lambda r: rmap.get(r, {}).get('route_std_delay', 0))
+                df_input["route_count"] = df_input["route_id"].apply(lambda r: rmap.get(r, {}).get('route_count', 0))
+            else:
+                for c in ["route_mean_delay", "route_median_delay", "route_std_delay", "route_count"]:
+                    if c in num_features and c not in df_input.columns:
+                        df_input[c] = 0
+
+        # route_hour_mean: try lookup in route_hour_map else fallback to route_mean_delay
+        if "route_hour_mean" in num_features:
+            def _route_hour_val(row):
+                key = (row['route_id'], int(row['hour']))
+                return route_hour_map.get(key, row.get('route_mean_delay', 0))
+
+            df_input['route_hour_mean'] = df_input.apply(_route_hour_val, axis=1)
+
+        # weather mean
+        if "weather_mean_delay" in num_features:
+            df_input['weather_mean_delay'] = df_input['weather'].apply(lambda w: weather_mean_map.get(w, 0))
+
+        # dow (if missing) infer from day_type or default 0
+        if 'dow' in num_features and 'dow' not in df_input.columns:
+            if is_weekend_str == 'weekend':
+                df_input['dow'] = 6
+            else:
+                df_input['dow'] = 0
+
+        # latitude/longitude defaults
+        if 'latitude' in num_features and 'latitude' not in df_input.columns:
+            df_input['latitude'] = float(data.get('latitude', 0) or 0)
+        if 'longitude' in num_features and 'longitude' not in df_input.columns:
+            df_input['longitude'] = float(data.get('longitude', 0) or 0)
+
+        # Now scale numeric features if scaler present
         if scaler:
-            # Only scale what was scaled during training
+            # ensure all num_features exist
+            for c in num_features:
+                if c not in df_input.columns:
+                    df_input[c] = 0
             df_input[num_features] = scaler.transform(df_input[num_features])
 
         # 4. One-Hot Encoding & Alignment
@@ -268,13 +352,27 @@ def predict():
 
         df_final = df_final.reindex(columns=feature_columns, fill_value=0)
 
-        # Predict
-        rf_raw = rf_model.predict(df_final)[0]
-        lr_raw = lr_model.predict(df_final)[0]
+        # Predict with serving model (best model)
+        svc_raw = serving_model.predict(df_final)[0]
+        svc_pred = round(max(0, svc_raw), 1)
 
-        # Clip negative predictions
-        rf_pred = round(max(0, rf_raw), 1)
-        lr_pred = round(max(0, lr_raw), 1)
+        # Also predict with RF (explicit) if available
+        rf_pred = None
+        try:
+            if rf_model is not None:
+                rf_raw = rf_model.predict(df_final)[0]
+                rf_pred = round(max(0, rf_raw), 1)
+        except Exception:
+            rf_pred = None
+
+        # Also predict with LR if available (for comparison)
+        lr_pred = None
+        if lr_model is not None:
+            try:
+                lr_raw = lr_model.predict(df_final)[0]
+                lr_pred = round(max(0, lr_raw), 1)
+            except Exception:
+                lr_pred = None
 
         # Build simple per-prediction explanations
         rf_reason = 'RF explanation not available.'
@@ -310,13 +408,19 @@ def predict():
             print('Explanation generation error:', e)
 
         # Return predictions, accuracies and per-model reasons
+        # Include both generic `serving_*` and explicit `rf_*` keys because
+        # the frontend expects `rf_prediction`, `rf_accuracy`, `rf_reason`.
         return jsonify(
             {
-                "rf_prediction": rf_pred,
-                "lr_prediction": lr_pred,
+                "serving_prediction": svc_pred,
+                "serving_model": model_data.get("best_model_name", "serving"),
+                # provide RF-named fields for frontend compatibility (prefer explicit rf_model prediction)
+                "rf_prediction": (rf_pred if rf_pred is not None else svc_pred),
                 "rf_accuracy": f"RMSE: {rf_metrics.get('rmse', 'N/A')}",
-                "lr_accuracy": f"RMSE: {lr_metrics.get('rmse', 'N/A')}",
                 "rf_reason": rf_reason,
+                # LR comparator fields
+                "lr_prediction": lr_pred,
+                "lr_accuracy": f"RMSE: {lr_metrics.get('rmse', 'N/A')}",
                 "lr_reason": lr_reason,
             }
         )
