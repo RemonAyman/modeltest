@@ -5,6 +5,7 @@ from sklearn.ensemble import RandomForestRegressor
 from sklearn.model_selection import cross_val_predict, KFold
 from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 from sklearn.preprocessing import StandardScaler
+from ml_pipeline import safe_save_model_data
 
 
 def rae(y_true, y_pred):
@@ -109,16 +110,19 @@ def main():
     # fit on full data
     rf.fit(X, y)
 
-    # update model_data and save
+    # prepare candidate model_data
     md['rf_model'] = rf
     md['rf_metrics'] = metrics
     md['feature_columns'] = feature_columns
     md['scaler'] = scaler
     md['num_features'] = num_features
 
-    # If no serving_model set, keep existing best_model; do not override best_model selection here
-    joblib.dump(md, 'model_data.pkl')
-    print('Updated model_data.pkl with retrained rf_model and rf_metrics')
+    # Use safe save to avoid overwriting a better existing model
+    saved, msg = safe_save_model_data(md, candidate_best_r2=metrics.get('r2', float('-inf')))
+    if saved:
+        print('Updated model_data.pkl with retrained rf_model and rf_metrics')
+    else:
+        print('Did NOT overwrite model_data.pkl:', msg)
 
 
 if __name__ == '__main__':
