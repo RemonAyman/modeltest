@@ -40,16 +40,49 @@ init_db()
 # Load Model
 try:
     model_data = joblib.load("model_data.pkl")
-    # prefer a serving/best model if present
-    serving_model = model_data.get("serving_model") or model_data.get("best_model") or model_data.get("rf_model")
-    # keep lr_model for comparison if available
+    # restore saved objects (do NOT refit anything here)
     lr_model = model_data.get("lr_model")
-    # prefer a dedicated rf_model stored in model_data; otherwise fall back to serving_model
-    rf_model = model_data.get('rf_model', serving_model)
+    rf_model = model_data.get('rf_model')
+    hgb_model = model_data.get('hgb_model')
+    # metrics and metadata
     rf_metrics = model_data.get("rf_metrics", {})
     lr_metrics = model_data.get("lr_metrics", {})
-    # Feature columns for alignment
-    model_data.get("feature_columns", [])
+    best_cv_r2 = model_data.get('best_cv_r2')
+    best_model_name = model_data.get('best_model_name')
+    # Feature columns and scaler to be used for prediction (no fitting)
+    feature_columns = model_data.get("feature_columns", [])
+    scaler = model_data.get('scaler')
+    num_features = model_data.get('num_features', ["passenger_count", "hour", "is_weekend"])
+
+    # determine serving model by best_model_name or best_cv_r2
+    serving_model = None
+    serving_name = None
+    if best_model_name:
+        if best_model_name == 'lr' and lr_model is not None:
+            serving_model = lr_model
+            serving_name = 'lr'
+        elif best_model_name == 'rf' and rf_model is not None:
+            serving_model = rf_model
+            serving_name = 'rf'
+        elif best_model_name == 'hgb' and hgb_model is not None:
+            serving_model = hgb_model
+            serving_name = 'hgb'
+
+    # fallback: choose the model with highest saved per-model CV r2 if best_model_name missing
+    if serving_model is None:
+        candidates = []
+        if lr_metrics and 'r2' in lr_metrics:
+            candidates.append(('lr', lr_metrics.get('r2')))
+        if rf_metrics and 'r2' in rf_metrics:
+            candidates.append(('rf', rf_metrics.get('r2')))
+        hgb_metrics = model_data.get('hgb_metrics', {})
+        if hgb_metrics and 'r2' in hgb_metrics:
+            candidates.append(('hgb', hgb_metrics.get('r2')))
+        if candidates:
+            candidates.sort(key=lambda x: x[1], reverse=True)
+            serving_name = candidates[0][0]
+            serving_model = {'lr': lr_model, 'rf': rf_model, 'hgb': hgb_model}.get(serving_name)
+
     # route_stats (dict of lists) -> DataFrame for quick lookup
     route_stats_df = None
     if model_data.get('route_stats'):
@@ -57,20 +90,28 @@ try:
             route_stats_df = pd.DataFrame(model_data.get('route_stats'))
         except Exception:
             route_stats_df = None
-    # load cleaned dataset for route_hour_mean and weather_mean lookups
+
+    # load cleaned dataset for route_hour_mean and weather_mean lookups if saved maps absent
     df_clean = None
     try:
         df_clean = pd.read_csv('cleaned_transport_dataset.csv')
-        # build lookup maps
-        route_hour_map = df_clean.set_index(['route_id', 'hour'])['route_hour_mean'].to_dict()
-        weather_mean_map = df_clean.groupby('weather')['weather_mean_delay'].mean().to_dict()
+        # build lookup maps only if not present in model_data
+        route_hour_map = model_data.get('route_hour_map') or df_clean.set_index(['route_id', 'hour'])['route_hour_mean'].to_dict()
+        weather_mean_map = model_data.get('weather_mean_map') or df_clean.groupby('weather')['weather_mean_delay'].mean().to_dict()
     except Exception:
-        route_hour_map = {}
-        weather_mean_map = {}
+        route_hour_map = model_data.get('route_hour_map', {}) or {}
+        weather_mean_map = model_data.get('weather_mean_map', {}) or {}
+
+    print(f"Loaded model_data.pkl: serving_name={serving_name}, best_cv_r2={best_cv_r2}")
 except Exception as e:
     print(f"Error loading model: {e}")
     # Fallback for dev if model not trained yet
     serving_model = rf_model = lr_model = None
+    feature_columns = []
+    scaler = None
+    num_features = ["passenger_count", "hour", "is_weekend"]
+    route_hour_map = {}
+    weather_mean_map = {}
 
 
 @app.route("/")
@@ -354,7 +395,17 @@ def predict():
 
         # Predict with serving model (best model)
         svc_raw = serving_model.predict(df_final)[0]
-        svc_pred = round(max(0, svc_raw), 1)
+        svc_pred = svc_raw
+        try:
+            # If serving model is LR and lr was trained on log1p, apply inverse
+            if 'serving_name' in globals() and serving_name == 'lr' and model_data.get('lr_target_transform') == 'log1p':
+                svc_pred = np.expm1(svc_raw)
+                print(f"Serving (LR) raw: {svc_raw}, after inverse np.expm1: {svc_pred}")
+            else:
+                print(f"Serving model ({globals().get('serving_name', 'unknown')}) raw prediction: {svc_raw}")
+        except Exception as e:
+            print('Error applying serving inverse transform:', e)
+        svc_pred = round(max(0, float(svc_pred)), 1)
 
         # Also predict with RF (explicit) if available
         rf_pred = None
@@ -370,7 +421,15 @@ def predict():
         if lr_model is not None:
             try:
                 lr_raw = lr_model.predict(df_final)[0]
-                lr_pred = round(max(0, lr_raw), 1)
+                # Log raw LR prediction and apply inverse transform if needed (no refit)
+                lr_target_transform = model_data.get('lr_target_transform') if model_data else None
+                print(f"LR raw prediction before inverse transform: {lr_raw}, lr_target_transform={lr_target_transform}")
+                if lr_target_transform == 'log1p':
+                    lr_inv = np.expm1(lr_raw)
+                    print(f"LR prediction after np.expm1: {lr_inv}")
+                    lr_pred = round(max(0, lr_inv), 1)
+                else:
+                    lr_pred = round(max(0, lr_raw), 1)
             except Exception:
                 lr_pred = None
 
